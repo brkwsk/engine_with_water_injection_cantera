@@ -1,4 +1,4 @@
-# engine_with_water_injection_cantera
+# engine with water injection python cantera
 This program allows simplified simulations of 0-dimensional internal combustion engine's work with water injection.
 
 The code is a modified version of an example aviable on Cantera's page: 
