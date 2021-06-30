@@ -5,12 +5,18 @@ The code is a modified version of an example aviable on Cantera's page:
 https://cantera.org/examples/python/reactors/ic_engine.py.html
 
 Requirements:
+
 -python3
 -cantera
 -matplotlib
 -numpy
 -csv
+-scipy
 -tkinter (for version with GUI)
+
+For simulation of gasoline combustion, dditional reaction mechanism file (Blanquart et al Mechanism) is required, aviable here:
+
+https://shepherd.caltech.edu/EDL/PublicResources/sdt/cti_mech.html
 
 A large part of the comments is in Polish, which I plan to change in the future for easier reading.
 
