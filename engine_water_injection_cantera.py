@@ -11,7 +11,7 @@ and saves output as text files containing parameters of
 every 10th step of simulation plus p-V plots.
 It is based on Cantera example ic_engine.py. 
 """
-#import cantera as ct
+import cantera as ct
 import tkinter as tk
 #from matplotlib import pyplot as plt
 import numpy as np
@@ -183,7 +183,8 @@ class Simulate:
         water_injection_mechanism = "liquidvapor.cti" # required to include evaporation of water
         phase_name = 'iso-octane'
         comp_air = 'o2:1, n2:3.76'
-        comp_fuel = 'I-C8H18:1'
+        comp_fuel = 'I-C8H18:1' # approximation of gasoline composition
+        comp_spark = 'OH:1' # highly reactive radicals allow reduction of the mass of spark
         
         # engine parameters
         self.f = 3000. / 60.  # engine speed [1/s] (3000 rpm)
@@ -199,7 +200,6 @@ class Simulate:
         # parameters of spark ignition
         e_spark = 50. # approximateenergy of spark [J]
         T_spark = 10000. # temperature of spark [K]
-        
         
         # turbocharger temperature, pressure, and composition
         T_inlet = 300.  # K
@@ -235,7 +235,6 @@ class Simulate:
         # Fuel mass, injector open and close timings
         injector_open = self.rad(345.)
         injector_close = self.rad(360.)
-        injector_opening_time = self.time(injector_close - injector_open)
         lmbd = 1.2 # air-fuel ratio
         V_air = 0.44927e-3 # volume of air at the moment of inlet valve closing, measured in simulation [m**3]
         p_air = 1.1e5 # in-cyllinder pressure at the moment of inlet valve closing, measured in simulation [m**3]
@@ -248,7 +247,6 @@ class Simulate:
         # Ignition timing
         start_spark = self.rad(355.)
         end_spark = self.rad(356.)
-        time_spark = self.time(end_spark - start_spark)
         
         # Water mass and injector timings
         # Injection is prolonged to simulate evaporation rate
@@ -257,7 +255,7 @@ class Simulate:
         self.water_evaporation_time = self.calculate_water_evaporation_time() # s
         self.water_close = self.water_open + self.crank_angle(self.water_evaporation_time)
         
-        water_evaporation_time_2 = 1.
+        second_water_evaporation_time = 1.
         water_close_2 = start_spark
         if self.water_close > start_spark: # water has not evaporated before ignition - increase evaporation rate due to higher temperatures
             self.water_close = start_spark
@@ -271,13 +269,105 @@ class Simulate:
                 water_close_2 = outlet_open
         
         # Simulation time and parameters
-        sim_n_revolutions = 8
+        sim_n_revolutions = 6   # 3 cycles of engine work
         delta_T_max = 20.
         rtol = 1.e-12
         atol = 1.e-16
         
         #####################################################################
-        # Set up IC engine Parameters and Functions
+        # Set up Reactor Network
+        #####################################################################
+        
+        # load reaction mechanism
+        gas = ct.Solution(reaction_mechanism, phase_name)
+        w = ct.PureFluid(water_injection_mechanism,"water") # different mechanism for water injector allows calculations using evaporation heat
+        
+        # define initial state and set up reactor
+        gas.TPX = T_inlet, p_inlet, comp_inlet
+        cyllinder = ct.IdealGasReactor(gas)
+        cyllinder.volume = V_oT
+        
+        # define inlet state
+        inlet = ct.Reservoir(gas)
+        
+        # inlet valve
+        inlet_valve = ct.Valve(inlet, cyllinder)
+        inlet_delta = np.mod(inlet_close - inlet_open, 4 * np.pi)
+        inlet_valve.valve_coeff = inlet_valve_coeff
+        inlet_valve.set_time_function(
+            lambda t: np.mod(self.crank_angle(t) - inlet_open, 4 * np.pi) < inlet_delta)
+        
+        # define fuel injector state (gaseous!)
+        gas.TPX = T_injector, p_injector, comp_injector
+        fuel_injector = ct.Reservoir(gas)
+        
+        # define water injector state
+        w.TP = T_water, 1.0e5
+        water_injector = ct.Reservoir(w)
+        
+        # define spark state
+        gas.TPX = T_spark, p_injector, comp_spark
+        igniter = ct.Reservoir(gas)
+        
+        # fuel injector is modeled as a mass flow controller
+        fuel_injector_mfc = ct.MassFlowController(fuel_injector, cyllinder)
+        fuel_injector_delta = np.mod(injector_close - injector_open, 4 * np.pi)
+        fuel_injector_t_open = self.time(injector_close - injector_open)
+        fuel_injector_mfc.mass_flow_coeff = injector_mass / fuel_injector_t_open
+        fuel_injector_mfc.set_time_function(
+            lambda t: np.mod(self.crank_angle(t) - injector_open, 4 * np.pi) < fuel_injector_delta)
+        
+        # water injector is modeled as two mass flow controllers, activating before and after ignition
+        water_injector_mfc = ct.MassFlowController(water_injector, cyllinder)
+        water_injector_mfc_2 = ct.MassFlowController(water_injector, cyllinder)
+        
+        water_injector_delta = np.mod(self.water_close - self.water_open, 4 * np.pi)
+        water_injector_delta_2 = np.mod(self.water_close_2 - self.water_close, 4 * np.pi)
+        
+        water_injector_mfc.mass_flow_coeff = self.water_mass / self.water_evaporation_time
+        water_injector_mfc.set_time_function(
+            lambda t: np.mod(self.crank_angle(t) - self.water_open, 4 * np.pi) < water_injector_delta)
+        
+        water_injector_mfc_2.mass_flow_coeff = self.water_mass_2 / second_water_evaporation_time
+        water_injector_mfc_2.set_time_function(
+            lambda t: np.mod(self.crank_angle(t) - self.water_close, 4 * np.pi) < water_injector_delta_2)
+        
+        # spark ignition is modeled as a mass flow controller (approximation!)
+        spark_mfc = ct.MassFlowController(igniter, cyllinder)
+        spark_delta = np.mod(end_spark - start_spark, 4 * np.pi)
+        spark_t_open = self.time(end_spark - start_spark)
+        spark_mass = e_spark/igniter.thermo.cp_mass/T_spark
+        spark_mfc.mass_flow_coeff = spark_mass / spark_t_open
+        spark_mfc.set_time_function(
+            lambda t: np.mod(self.crank_angle(t) - start_spark, 4 * np.pi) < spark_delta)
+        
+        # define outlet pressure (temperature and composition don't matter)
+        gas.TPX = T_ambient, p_outlet, comp_ambient
+        outlet = ct.Reservoir(gas)
+        
+        # outlet valve
+        outlet_valve = ct.Valve(cyllinder, outlet)
+        outlet_delta = np.mod(outlet_close - outlet_open, 4 * np.pi)
+        outlet_valve.valve_coeff = outlet_valve_coeff
+        outlet_valve.set_time_function(
+            lambda t: np.mod(self.crank_angle(t) - outlet_open, 4 * np.pi) < outlet_delta)
+        
+        # define ambient pressure (temperature and composition don't matter)
+        gas.TPX = T_ambient, p_ambient, comp_ambient
+        ambient_air = ct.Reservoir(gas)
+        
+        # piston is modeled as a moving wall
+        piston = ct.Wall(ambient_air, cyllinder)
+        piston.area = A_piston
+        piston.set_velocity(self.piston_speed)
+        
+        # create a reactor network containing the cylinder and limit advance step
+        sim = ct.ReactorNet([cyllinder])
+        sim.rtol, sim.atol = rtol, atol
+        cyllinder.set_advance_limit('temperature', delta_T_max)
+        
+        #####################################################################
+        # Set up IC engine Functions
         #####################################################################
         
 
