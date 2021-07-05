@@ -13,8 +13,9 @@ It is based on Cantera example ic_engine.py.
 """
 import cantera as ct
 import tkinter as tk
-#from matplotlib import pyplot as plt
+from matplotlib import pyplot as plt
 import numpy as np
+from scipy.integrate import trapz
 
 class GUI_Input:
     """This class provides a GUI, takes input values of crank angle at the beginning 
@@ -181,7 +182,7 @@ class Simulate:
         # reaction mechanism, kinetics type and compositions
         reaction_mechanism = 'blanquart.cti'
         water_injection_mechanism = "liquidvapor.cti" # required to include evaporation of water
-        phase_name = 'iso-octane'
+        phase_name = 'I-C8H18'
         comp_air = 'o2:1, n2:3.76'
         comp_fuel = 'I-C8H18:1' # approximation of gasoline composition
         comp_spark = 'OH:1' # highly reactive radicals allow reduction of the mass of spark
@@ -256,6 +257,7 @@ class Simulate:
         self.water_close = self.water_open + self.crank_angle(self.water_evaporation_time)
         
         second_water_evaporation_time = 1.
+        self.water_mass_2 = 0.
         water_close_2 = start_spark
         if self.water_close > start_spark: # water has not evaporated before ignition - increase evaporation rate due to higher temperatures
             self.water_close = start_spark
@@ -279,7 +281,7 @@ class Simulate:
         #####################################################################
         
         # load reaction mechanism
-        gas = ct.Solution(reaction_mechanism, phase_name)
+        gas = ct.Solution(reaction_mechanism, id = phase_name)
         w = ct.PureFluid(water_injection_mechanism,"water") # different mechanism for water injector allows calculations using evaporation heat
         
         # define initial state and set up reactor
@@ -322,7 +324,7 @@ class Simulate:
         water_injector_mfc_2 = ct.MassFlowController(water_injector, cyllinder)
         
         water_injector_delta = np.mod(self.water_close - self.water_open, 4 * np.pi)
-        water_injector_delta_2 = np.mod(self.water_close_2 - self.water_close, 4 * np.pi)
+        water_injector_delta_2 = np.mod(water_close_2 - self.water_close, 4 * np.pi)
         
         water_injector_mfc.mass_flow_coeff = self.water_mass / self.water_evaporation_time
         water_injector_mfc.set_time_function(
@@ -365,6 +367,125 @@ class Simulate:
         sim = ct.ReactorNet([cyllinder])
         sim.rtol, sim.atol = rtol, atol
         cyllinder.set_advance_limit('temperature', delta_T_max)
+        
+        #####################################################################
+        # Run Simulation
+        #####################################################################
+        
+        # set up output data arrays
+        states = ct.SolutionArray(
+            cyllinder.thermo,
+            extra=('t', 'ca', 'V', 'm', 'mdot_in', 'mdot_out', 'dWv_dt'),
+        )
+        
+        # simulate with a maximum resolution of 1 deg crank angle
+        dt = 1. / (360 * self.f)
+        t_stop = sim_n_revolutions / self.f
+        while sim.time < t_stop:
+        
+            # perform time integration
+            sim.advance(sim.time + dt)
+        
+            # calculate results to be stored
+            dWv_dt = - (cyllinder.thermo.P - ambient_air.thermo.P) * A_piston * \
+                self.piston_speed(sim.time)
+        
+            # append output data
+            states.append(cyllinder.thermo.state,
+                          t=sim.time, ca=self.crank_angle(sim.time),
+                          V=cyllinder.volume, m=cyllinder.mass,
+                          mdot_in=inlet_valve.mass_flow_rate,
+                          mdot_out=outlet_valve.mass_flow_rate,
+                          dWv_dt=dWv_dt)
+        
+        #######################################################################
+        # Plot Results in matplotlib
+        #######################################################################
+        
+        def ca_ticks(t):
+            """Helper function converts time to rounded crank angle."""
+            return np.round(self.crank_angle(t) * 180 / np.pi, decimals=1)
+        
+        t = states.t
+        
+        # pressure and temperature
+        xticks = np.arange(0, 0.18, 0.02)
+        fig, ax = plt.subplots(nrows=2)
+        ax[0].plot(t, states.P / 1.e5)
+        ax[0].set_ylabel('$p$ [bar]')
+        ax[0].set_xlabel(r'$\phi$ [deg]')
+        ax[0].set_xticklabels([])
+        ax[1].plot(t, states.T)
+        ax[1].set_ylabel('$T$ [K]')
+        ax[1].set_xlabel(r'$\phi$ [deg]')
+        ax[1].set_xticks(xticks)
+        ax[1].set_xticklabels(ca_ticks(xticks))
+        plt.show()
+        
+        # p-V diagram
+        fig, ax = plt.subplots()
+        ax.plot(states.V[t > 0.04] * 1000, states.P[t > 0.04] / 1.e5)
+        ax.set_xlabel('$V$ [l]')
+        ax.set_ylabel('$p$ [bar]')
+        plt.show()
+        
+        # T-S diagram
+        fig, ax = plt.subplots()
+        ax.plot(states.m[t > 0.04] * states.s[t > 0.04], states.T[t > 0.04])
+        ax.set_xlabel('$S$ [J/K]')
+        ax.set_ylabel('$T$ [K]')
+        plt.show()
+        
+        # heat of reaction and expansion work
+        fig, ax = plt.subplots()
+        ax.plot(t, 1.e-3 * states.heat_release_rate * states.V, label=r'$\dot{Q}$')
+        ax.plot(t, 1.e-3 * states.dWv_dt, label=r'$\dot{W}_v$')
+        ax.set_ylim(-1e2, 1e3)
+        ax.legend(loc=0)
+        ax.set_ylabel('[kW]')
+        ax.set_xlabel(r'$\phi$ [deg]')
+        ax.set_xticks(xticks)
+        ax.set_xticklabels(ca_ticks(xticks))
+        plt.show()
+        
+        # gas composition
+        fig, ax = plt.subplots()
+        ax.plot(t, states('o2').X, label='O2')
+        ax.plot(t, states('co2').X, label='CO2')
+        ax.plot(t, states('co').X, label='CO')
+        ax.plot(t, states('i-c8h18').X * 10, label='iso-octane x10')
+        ax.legend(loc=0)
+        ax.set_ylabel('$X_i$ [-]')
+        ax.set_xlabel(r'$\phi$ [deg]')
+        ax.set_xticks(xticks)
+        ax.set_xticklabels(ca_ticks(xticks))
+        plt.show()
+        
+        ######################################################################
+        # Integral Results
+        ######################################################################
+        
+        # heat release
+        Q = trapz(states.heat_release_rate * states.V, t)
+        output_str = '{:45s}{:>4.1f} {}'
+        print(output_str.format('Heat release rate per cylinder (estimate):',
+                                Q / t[-1] / 1000., 'kW'))
+        
+        # expansion power
+        W = trapz(states.dWv_dt, t)
+        print(output_str.format('Expansion power per cylinder (estimate):',
+                                W / t[-1] / 1000., 'kW'))
+        
+        # efficiency
+        eta = W / Q
+        print(output_str.format('Efficiency (estimate):', eta * 100., '%'))
+        
+        # CO emissions
+        MW = states.mean_molecular_weight
+        CO_emission = trapz(MW * states.mdot_out * states('CO').X[:, 0], t)
+        CO_emission /= trapz(MW * states.mdot_out, t)
+        print(output_str.format('CO emission (estimate):', CO_emission * 1.e6, 'ppm'))
+        
         
         #####################################################################
         # Set up IC engine Functions
